@@ -1,0 +1,25 @@
+[package]
+name = "leonardo"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dotenv = "0.15"
+teloxide = { version = "0.8", default-features = false, features = ["macros", "auto-send", "rustls"] }
+log = "0.4"
+pretty_env_logger = "0.4"
+reqwest = { version = "0.11.0", features = ["json", "stream", "multipart", "rustls-tls"], default-features = false }
+serde = "1"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version =  "1.8", features = ["parking_lot", "rt-multi-thread", "macros"] }
+
+[profile.release]
+codegen-units = 1
+debug = false
+incremental = false
+lto = true
+opt-level = 3
+panic = "abort"
+debug-assertions = false
