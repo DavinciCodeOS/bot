@@ -18,7 +18,14 @@ use teloxide::{
 use time::OffsetDateTime;
 use tokio::{io::AsyncWriteExt, process::Command as TokioCommand};
 
-use std::{env, error::Error, fs, io::Cursor, path::PathBuf, process::Stdio};
+use std::{
+    env,
+    error::Error,
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 // const DCOS_SUPPORT_ID: i64 = 1638468462;
 // const DCOS_RELEASES_ID: i64 = 1791772972;
@@ -568,7 +575,7 @@ async fn receive_creation_confirmation(
                     let mut callbacks = RemoteCallbacks::new();
                     let mut remote = repo.find_remote("origin")?;
                     callbacks.credentials(|_url, username_from_url, _allowed_type| {
-                        Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+                        Cred::ssh_key(username_from_url.unwrap_or("git"), None, Path::new(&env::var("SSH_KEY").unwrap()), None)
                     });
                     push_opts.remote_callbacks(callbacks);
                     remote.push(&[&branch_refspec], Some(&mut push_opts))?;
