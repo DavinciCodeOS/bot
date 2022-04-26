@@ -1,4 +1,8 @@
 use git2::{Cred, IndexAddOption, PushOptions, RemoteCallbacks, Repository};
+use image::{
+    codecs::pnm::{PnmSubtype, SampleEncoding},
+    load_from_memory, GenericImage, GenericImageView, Rgb, RgbImage,
+};
 use serde::{Deserialize, Serialize};
 use teloxide::{
     dispatching::{
@@ -14,7 +18,7 @@ use teloxide::{
 use time::OffsetDateTime;
 use tokio::{io::AsyncWriteExt, process::Command as TokioCommand};
 
-use std::{env, error::Error, fs, path::PathBuf, process::Stdio};
+use std::{env, error::Error, fs, io::Cursor, path::PathBuf, process::Stdio};
 
 // const DCOS_SUPPORT_ID: i64 = 1638468462;
 // const DCOS_RELEASES_ID: i64 = 1791772972;
@@ -372,58 +376,41 @@ async fn receive_description(
     let mut file_bytes = Vec::new();
     bot.download_file(&file.file_path, &mut file_bytes).await?;
 
-    bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting PNG to black...")
+    bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting PNG to black PNM...")
         .await?;
 
-    let mut convert_proc = TokioCommand::new("convert");
-    convert_proc.args(&["-", "xc:#000000", "-channel", "RGB", "-clut", "-"]);
-    convert_proc.stdout(Stdio::piped());
-    convert_proc.stdin(Stdio::piped());
+    let pnm_pixel_bytes = tokio::task::spawn_blocking(move || {
+        let mut img = load_from_memory(&file_bytes)?;
+        let mut out_img = RgbImage::new(img.width(), img.height());
 
-    let mut child = convert_proc.spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                // Convert any pixels that are not transparent to black
+                let pixel = img.get_pixel(x, y);
 
-    stdin.write_all(&file_bytes).await?;
-    drop(stdin);
+                if pixel.0[3] > 0 {
+                    out_img.put_pixel(x, y, Rgb::<u8>([0, 0, 0]));
+                } else {
+                    out_img.put_pixel(x, y, Rgb::<u8>([255, 255, 255]));
+                }
 
-    let op = child.wait_with_output().await?;
+                img.put_pixel(x, y, pixel);
+            }
+        }
 
-    if !op.status.success() {
-        bot.edit_message_text(msg.chat.id, bot_msg.id, "Failed to convert PNG to black.")
-            .await?;
+        let mut out = Vec::new();
 
-        return Ok(());
-    } else {
-        bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting PNG to PNM...")
-            .await?;
-    }
+        out_img.write_to(
+            &mut Cursor::new(&mut out),
+            image::ImageOutputFormat::Pnm(PnmSubtype::Pixmap(SampleEncoding::Binary)),
+        )?;
 
-    let black_pixel_bytes = op.stdout;
+        Ok::<_, Box<dyn Error + Send + Sync>>(out)
+    })
+    .await??;
 
-    let mut pnm_proc = TokioCommand::new("pngtopnm");
-    pnm_proc.arg("-mix");
-    pnm_proc.stdout(Stdio::piped());
-    pnm_proc.stdin(Stdio::piped());
-
-    let mut child = pnm_proc.spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-
-    stdin.write_all(&black_pixel_bytes).await?;
-    drop(stdin);
-
-    let op = child.wait_with_output().await?;
-
-    if !op.status.success() {
-        bot.edit_message_text(msg.chat.id, bot_msg.id, "Failed to convert PNG to PNM.")
-            .await?;
-
-        return Ok(());
-    } else {
-        bot.edit_message_text(msg.chat.id, bot_msg.id, "Tracing PNM to SVG...")
-            .await?;
-    }
-
-    let pnm_pixel_bytes = op.stdout;
+    bot.edit_message_text(msg.chat.id, bot_msg.id, "Tracing PNM to SVG...")
+        .await?;
 
     let mut potrace_proc = TokioCommand::new("potrace");
     potrace_proc.arg("--svg");
