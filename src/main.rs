@@ -1,9 +1,7 @@
 use git2::{Cred, IndexAddOption, PushOptions, RemoteCallbacks, Repository};
-use image::{
-    codecs::pnm::{PnmSubtype, SampleEncoding},
-    load_from_memory, GenericImage, GenericImageView, Rgb, RgbImage,
-};
+use image::load_from_memory;
 use serde::{Deserialize, Serialize};
+use svg_trace::{convert_image_to_svg, Config, Preset};
 use teloxide::{
     dispatching::{
         dialogue::{self, GetChatId, InMemStorage},
@@ -22,7 +20,6 @@ use std::{
     env,
     error::Error,
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -391,63 +388,37 @@ async fn receive_description(
             bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting PNG to black PNM...")
                 .await?;
 
-            let pnm_pixel_bytes = tokio::task::spawn_blocking(move || {
-                let mut img = load_from_memory(&file_bytes)?;
-                let mut out_img = RgbImage::new(img.width(), img.height());
+            let svg = tokio::task::spawn_blocking(move || {
+                let mut img = load_from_memory(&file_bytes)?.into_rgba8();
 
                 for y in 0..img.height() {
                     for x in 0..img.width() {
                         // Convert any pixels that are not transparent to black
-                        let pixel = img.get_pixel(x, y);
+                        let mut pixel = img.get_pixel_mut(x, y);
 
                         if pixel.0[3] > 0 {
-                            out_img.put_pixel(x, y, Rgb::<u8>([0, 0, 0]));
+                            // Make it black but keep transparency
+                            pixel.0[0] = 0;
+                            pixel.0[1] = 0;
+                            pixel.0[2] = 0;
                         } else {
-                            out_img.put_pixel(x, y, Rgb::<u8>([255, 255, 255]));
+                            // Make it white
+                            pixel.0[0] = 255;
+                            pixel.0[1] = 255;
+                            pixel.0[2] = 255;
+                            pixel.0[3] = 255;
                         }
-
-                        img.put_pixel(x, y, pixel);
                     }
                 }
 
-                let mut out = Vec::new();
+                let svg = convert_image_to_svg(Config::from_preset(Preset::Bw), img)?;
 
-                out_img.write_to(
-                    &mut Cursor::new(&mut out),
-                    image::ImageOutputFormat::Pnm(PnmSubtype::Pixmap(SampleEncoding::Binary)),
-                )?;
-
-                Ok::<_, Box<dyn Error + Send + Sync>>(out)
+                Ok::<_, Box<dyn Error + Send + Sync>>(svg)
             })
             .await??;
 
-            bot.edit_message_text(msg.chat.id, bot_msg.id, "Tracing PNM to SVG...")
+            bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting SVG to VD...")
                 .await?;
-
-            let mut potrace_proc = TokioCommand::new("potrace");
-            potrace_proc.arg("--svg");
-            potrace_proc.stdout(Stdio::piped());
-            potrace_proc.stdin(Stdio::piped());
-
-            let mut child = potrace_proc.spawn()?;
-            let mut stdin = child.stdin.take().unwrap();
-
-            stdin.write_all(&pnm_pixel_bytes).await?;
-            drop(stdin);
-
-            let op = child.wait_with_output().await?;
-
-            if !op.status.success() {
-                bot.edit_message_text(msg.chat.id, bot_msg.id, "Failed to trace PNM to SVG.")
-                    .await?;
-
-                return Ok(());
-            } else {
-                bot.edit_message_text(msg.chat.id, bot_msg.id, "Converting SVG to VD...")
-                    .await?;
-            }
-
-            let svg_bytes = op.stdout;
 
             let mut vd_proc = TokioCommand::new("svg2vd");
             vd_proc.args(&["-i", "-", "-o", "-"]);
@@ -457,7 +428,7 @@ async fn receive_description(
             let mut child = vd_proc.spawn()?;
             let mut stdin = child.stdin.take().unwrap();
 
-            stdin.write_all(&svg_bytes).await?;
+            stdin.write_all(svg.as_bytes()).await?;
             drop(stdin);
 
             let op = child.wait_with_output().await?;
@@ -484,13 +455,10 @@ async fn receive_description(
                     }),
             );
 
-            bot.send_document(
-                msg.chat.id,
-                InputFile::memory(svg_bytes).file_name("icon.svg"),
-            )
-            .caption("Please review the SVG file and if it is good, proceed!")
-            .reply_markup(answers)
-            .await?;
+            bot.send_document(msg.chat.id, InputFile::memory(svg).file_name("icon.svg"))
+                .caption("Please review the SVG file and if it is good, proceed!")
+                .reply_markup(answers)
+                .await?;
 
             dialogue
                 .update(State::ConfirmingCreation {
@@ -536,7 +504,7 @@ async fn receive_description(
                 &bot,
                 dialogue,
                 icon_name,
-                file_bytes,
+                op.stdout,
                 app_path,
                 description.to_owned(),
             )
